@@ -27,6 +27,9 @@ class RequestService {
       createdBy
     } = requestData;
 
+    // Validate preventive maintenance scheduling requirements
+    this.validatePreventiveMaintenanceScheduling({ type, scheduledDate });
+
     // Validate equipment exists and is not scrapped
     const equipment = await prisma.equipment.findUnique({
       where: { id: equipmentId },
@@ -68,14 +71,6 @@ class RequestService {
       const error = new Error('Creator user not found');
       error.code = ERROR_CODES.USER_NOT_FOUND;
       error.statusCode = 404;
-      throw error;
-    }
-
-    // Validate scheduled date for preventive maintenance
-    if (type === MAINTENANCE_TYPES.PREVENTIVE && !scheduledDate) {
-      const error = new Error('Scheduled date is required for preventive maintenance');
-      error.code = ERROR_CODES.VALIDATION_ERROR;
-      error.statusCode = 400;
       throw error;
     }
 
@@ -936,6 +931,536 @@ class RequestService {
       error.statusCode = 400;
       throw error;
     }
+  }
+
+  /**
+   * Get calendar view data for scheduled maintenance requests
+   * @param {Object} filters - Filter options
+   * @param {string} [filters.startDate] - Start date for calendar view
+   * @param {string} [filters.endDate] - End date for calendar view
+   * @param {number} [filters.teamId] - Filter by team ID
+   * @param {string} [filters.type] - Filter by maintenance type
+   * @returns {Promise<Object>} Calendar view data with scheduled requests
+   */
+  static async getCalendarView(filters = {}) {
+    const {
+      startDate,
+      endDate,
+      teamId,
+      type
+    } = filters;
+
+    // Default to current month if no dates provided
+    const now = new Date();
+    const defaultStartDate = startDate ? new Date(startDate) : new Date(now.getFullYear(), now.getMonth(), 1);
+    const defaultEndDate = endDate ? new Date(endDate) : new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    // Build where clause for scheduled requests
+    const where = {
+      scheduledDate: {
+        gte: defaultStartDate,
+        lte: defaultEndDate
+      },
+      status: {
+        notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+      }
+    };
+
+    if (teamId) where.teamId = teamId;
+    if (type) where.type = type;
+
+    const scheduledRequests = await prisma.maintenanceRequest.findMany({
+      where,
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            name: true,
+            serialNumber: true
+          }
+        },
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        }
+      },
+      orderBy: {
+        scheduledDate: 'asc'
+      }
+    });
+
+    // Group requests by date for calendar display
+    const calendarData = {};
+    scheduledRequests.forEach(request => {
+      const dateKey = request.scheduledDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+      
+      if (!calendarData[dateKey]) {
+        calendarData[dateKey] = [];
+      }
+      
+      calendarData[dateKey].push({
+        id: request.id,
+        subject: request.subject,
+        type: request.type,
+        status: request.status,
+        equipment: request.equipment,
+        team: request.team,
+        assignee: request.assignee,
+        scheduledDate: request.scheduledDate
+      });
+    });
+
+    // Calculate summary statistics
+    const totalScheduled = scheduledRequests.length;
+    const preventiveCount = scheduledRequests.filter(r => r.type === MAINTENANCE_TYPES.PREVENTIVE).length;
+    const correctiveCount = scheduledRequests.filter(r => r.type === MAINTENANCE_TYPES.CORRECTIVE).length;
+    const overdueCount = scheduledRequests.filter(r => r.scheduledDate < now).length;
+
+    return {
+      calendarData,
+      summary: {
+        totalScheduled,
+        preventiveCount,
+        correctiveCount,
+        overdueCount,
+        dateRange: {
+          startDate: defaultStartDate.toISOString().split('T')[0],
+          endDate: defaultEndDate.toISOString().split('T')[0]
+        }
+      }
+    };
+  }
+
+  /**
+   * Get upcoming preventive maintenance requests
+   * @param {Object} filters - Filter options
+   * @param {number} [filters.teamId] - Filter by team ID
+   * @param {number} [filters.days] - Number of days to look ahead (default: 30)
+   * @returns {Promise<Array>} Upcoming preventive maintenance requests
+   */
+  static async getUpcomingPreventiveMaintenance(filters = {}) {
+    const {
+      teamId,
+      days = 30
+    } = filters;
+
+    const now = new Date();
+    const futureDate = new Date(now.getTime() + (days * 24 * 60 * 60 * 1000));
+
+    const where = {
+      type: MAINTENANCE_TYPES.PREVENTIVE,
+      scheduledDate: {
+        gte: now,
+        lte: futureDate
+      },
+      status: {
+        notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+      }
+    };
+
+    if (teamId) where.teamId = teamId;
+
+    const upcomingRequests = await prisma.maintenanceRequest.findMany({
+      where,
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            name: true,
+            serialNumber: true,
+            department: true,
+            location: true
+          }
+        },
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        }
+      },
+      orderBy: {
+        scheduledDate: 'asc'
+      }
+    });
+
+    return upcomingRequests;
+  }
+
+  /**
+   * Validate preventive maintenance scheduling requirements
+   * @param {Object} requestData - Request data to validate
+   * @throws {Error} If validation fails
+   */
+  static validatePreventiveMaintenanceScheduling(requestData) {
+    const { type, scheduledDate } = requestData;
+
+    // Preventive maintenance must have a scheduled date
+    if (type === MAINTENANCE_TYPES.PREVENTIVE) {
+      if (!scheduledDate) {
+        const error = new Error('Scheduled date is required for preventive maintenance requests');
+        error.code = ERROR_CODES.VALIDATION_ERROR;
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const scheduledDateTime = new Date(scheduledDate);
+      const now = new Date();
+
+      // Scheduled date cannot be in the past (allow same day)
+      if (scheduledDateTime < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+        const error = new Error('Scheduled date cannot be in the past');
+        error.code = ERROR_CODES.VALIDATION_ERROR;
+        error.statusCode = 400;
+        throw error;
+      }
+
+      // Scheduled date cannot be more than 2 years in the future
+      const maxFutureDate = new Date(now.getTime() + (2 * 365 * 24 * 60 * 60 * 1000));
+      if (scheduledDateTime > maxFutureDate) {
+        const error = new Error('Scheduled date cannot be more than 2 years in the future');
+        error.code = ERROR_CODES.VALIDATION_ERROR;
+        error.statusCode = 400;
+        throw error;
+      }
+    }
+
+    // Corrective maintenance should not have a scheduled date in the future
+    if (type === MAINTENANCE_TYPES.CORRECTIVE && scheduledDate) {
+      const scheduledDateTime = new Date(scheduledDate);
+      const now = new Date();
+
+      if (scheduledDateTime > now) {
+        const error = new Error('Corrective maintenance cannot be scheduled for future dates');
+        error.code = ERROR_CODES.VALIDATION_ERROR;
+        error.statusCode = 400;
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Get manager dashboard data with comprehensive statistics
+   * @param {number} [teamId] - Filter by team ID
+   * @returns {Promise<Object>} Dashboard data with statistics
+   */
+  static async getManagerDashboard(teamId = null) {
+    const now = new Date();
+    const startOfWeek = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const next30Days = new Date(now.getTime() + (30 * 24 * 60 * 60 * 1000));
+
+    // Build base where clause
+    const baseWhere = teamId ? { teamId } : {};
+
+    const [
+      totalEquipment,
+      totalRequests,
+      openRequests,
+      inProgressRequests,
+      completedThisWeek,
+      completedThisMonth,
+      overdueRequests,
+      upcomingPreventive,
+      preventiveVsCorrectiveStats,
+      recentRequests
+    ] = await Promise.all([
+      // Total equipment count
+      prisma.equipment.count({
+        where: {
+          ...baseWhere,
+          isScrapped: false
+        }
+      }),
+
+      // Total requests count
+      prisma.maintenanceRequest.count({
+        where: baseWhere
+      }),
+
+      // Open requests (NEW status)
+      prisma.maintenanceRequest.count({
+        where: {
+          ...baseWhere,
+          status: MAINTENANCE_STATUS.NEW
+        }
+      }),
+
+      // In-progress requests
+      prisma.maintenanceRequest.count({
+        where: {
+          ...baseWhere,
+          status: MAINTENANCE_STATUS.IN_PROGRESS
+        }
+      }),
+
+      // Completed this week
+      prisma.maintenanceRequest.count({
+        where: {
+          ...baseWhere,
+          status: MAINTENANCE_STATUS.REPAIRED,
+          updatedAt: {
+            gte: startOfWeek
+          }
+        }
+      }),
+
+      // Completed this month
+      prisma.maintenanceRequest.count({
+        where: {
+          ...baseWhere,
+          status: MAINTENANCE_STATUS.REPAIRED,
+          updatedAt: {
+            gte: startOfMonth
+          }
+        }
+      }),
+
+      // Overdue requests
+      prisma.maintenanceRequest.count({
+        where: {
+          ...baseWhere,
+          scheduledDate: {
+            lt: now
+          },
+          status: {
+            notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+          }
+        }
+      }),
+
+      // Upcoming preventive maintenance (next 30 days)
+      prisma.maintenanceRequest.count({
+        where: {
+          ...baseWhere,
+          type: MAINTENANCE_TYPES.PREVENTIVE,
+          scheduledDate: {
+            gte: now,
+            lte: next30Days
+          },
+          status: {
+            notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+          }
+        }
+      }),
+
+      // Preventive vs Corrective statistics
+      prisma.maintenanceRequest.groupBy({
+        by: ['type'],
+        where: {
+          ...baseWhere,
+          createdAt: {
+            gte: startOfMonth
+          }
+        },
+        _count: {
+          id: true
+        }
+      }),
+
+      // Recent requests (last 10)
+      prisma.maintenanceRequest.findMany({
+        where: baseWhere,
+        include: {
+          equipment: {
+            select: {
+              id: true,
+              name: true,
+              serialNumber: true
+            }
+          },
+          assignee: {
+            select: {
+              id: true,
+              name: true
+            }
+          }
+        },
+        orderBy: {
+          createdAt: 'desc'
+        },
+        take: 10
+      })
+    ]);
+
+    // Process preventive vs corrective stats
+    const typeStats = {
+      preventive: 0,
+      corrective: 0
+    };
+
+    preventiveVsCorrectiveStats.forEach(stat => {
+      if (stat.type === MAINTENANCE_TYPES.PREVENTIVE) {
+        typeStats.preventive = stat._count.id;
+      } else if (stat.type === MAINTENANCE_TYPES.CORRECTIVE) {
+        typeStats.corrective = stat._count.id;
+      }
+    });
+
+    return {
+      statistics: {
+        equipment: {
+          total: totalEquipment
+        },
+        requests: {
+          total: totalRequests,
+          open: openRequests,
+          inProgress: inProgressRequests,
+          overdue: overdueRequests,
+          completedThisWeek: completedThisWeek,
+          completedThisMonth: completedThisMonth
+        },
+        preventiveMaintenance: {
+          upcoming30Days: upcomingPreventive
+        },
+        typeBreakdown: {
+          preventiveThisMonth: typeStats.preventive,
+          correctiveThisMonth: typeStats.corrective
+        }
+      },
+      recentRequests
+    };
+  }
+
+  /**
+   * Get maintenance statistics by type and date range
+   * @param {Object} filters - Filter options
+   * @param {number} [filters.teamId] - Filter by team ID
+   * @param {string} [filters.startDate] - Start date for statistics
+   * @param {string} [filters.endDate] - End date for statistics
+   * @returns {Promise<Object>} Maintenance statistics
+   */
+  static async getMaintenanceStatistics(filters = {}) {
+    const {
+      teamId,
+      startDate,
+      endDate
+    } = filters;
+
+    // Default to current month if no dates provided
+    const now = new Date();
+    const defaultStartDate = startDate ? new Date(startDate) : new Date(now.getFullYear(), now.getMonth(), 1);
+    const defaultEndDate = endDate ? new Date(endDate) : new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    const baseWhere = {
+      createdAt: {
+        gte: defaultStartDate,
+        lte: defaultEndDate
+      }
+    };
+
+    if (teamId) baseWhere.teamId = teamId;
+
+    const [
+      requestsByType,
+      requestsByStatus,
+      averageCompletionTime,
+      equipmentWithMostRequests
+    ] = await Promise.all([
+      // Requests by type
+      prisma.maintenanceRequest.groupBy({
+        by: ['type'],
+        where: baseWhere,
+        _count: {
+          id: true
+        }
+      }),
+
+      // Requests by status
+      prisma.maintenanceRequest.groupBy({
+        by: ['status'],
+        where: baseWhere,
+        _count: {
+          id: true
+        }
+      }),
+
+      // Average completion time for completed requests
+      prisma.maintenanceRequest.aggregate({
+        where: {
+          ...baseWhere,
+          status: MAINTENANCE_STATUS.REPAIRED,
+          durationHours: {
+            not: null
+          }
+        },
+        _avg: {
+          durationHours: true
+        }
+      }),
+
+      // Equipment with most requests
+      prisma.maintenanceRequest.groupBy({
+        by: ['equipmentId'],
+        where: baseWhere,
+        _count: {
+          id: true
+        },
+        orderBy: {
+          _count: {
+            id: 'desc'
+          }
+        },
+        take: 5
+      })
+    ]);
+
+    // Get equipment details for top equipment
+    const equipmentIds = equipmentWithMostRequests.map(item => item.equipmentId);
+    const equipmentDetails = await prisma.equipment.findMany({
+      where: {
+        id: {
+          in: equipmentIds
+        }
+      },
+      select: {
+        id: true,
+        name: true,
+        serialNumber: true
+      }
+    });
+
+    // Combine equipment details with request counts
+    const topEquipment = equipmentWithMostRequests.map(item => {
+      const equipment = equipmentDetails.find(eq => eq.id === item.equipmentId);
+      return {
+        equipment,
+        requestCount: item._count.id
+      };
+    });
+
+    return {
+      dateRange: {
+        startDate: defaultStartDate.toISOString().split('T')[0],
+        endDate: defaultEndDate.toISOString().split('T')[0]
+      },
+      requestsByType: requestsByType.reduce((acc, item) => {
+        acc[item.type.toLowerCase()] = item._count.id;
+        return acc;
+      }, {}),
+      requestsByStatus: requestsByStatus.reduce((acc, item) => {
+        acc[item.status.toLowerCase()] = item._count.id;
+        return acc;
+      }, {}),
+      averageCompletionTime: averageCompletionTime._avg.durationHours || 0,
+      topEquipment
+    };
   }
 }
 

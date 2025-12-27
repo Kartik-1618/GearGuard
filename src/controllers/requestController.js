@@ -406,6 +406,125 @@ class RequestController {
       next(error);
     }
   }
+
+  /**
+   * Get calendar view data for scheduled maintenance requests
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async getCalendarView(req, res, next) {
+    try {
+      const { startDate, endDate, teamId, type } = req.query;
+
+      // Apply role-based filtering
+      let filters = {
+        startDate,
+        endDate,
+        type
+      };
+
+      if (req.user.role === 'TECHNICIAN') {
+        // Technicians can only see requests in their team or assigned to them
+        filters.teamId = req.user.teamId;
+      } else if (req.user.role === 'MANAGER') {
+        // Managers can see requests in their team
+        filters.teamId = req.user.teamId;
+      } else if (teamId) {
+        // Admins can filter by specific team
+        filters.teamId = parseInt(teamId);
+      }
+
+      const calendarData = await RequestService.getCalendarView(filters);
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: calendarData
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get scheduled maintenance requests for a specific date range
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async getScheduledRequests(req, res, next) {
+    try {
+      const { startDate, endDate, teamId, type, status } = req.query;
+
+      // Apply role-based filtering
+      let filters = {
+        scheduledDateFrom: startDate,
+        scheduledDateTo: endDate,
+        type,
+        status,
+        page: parseInt(req.query.page) || 1,
+        limit: parseInt(req.query.limit) || 50
+      };
+
+      if (req.user.role === 'TECHNICIAN') {
+        // Technicians can only see requests in their team or assigned to them
+        filters.teamId = req.user.teamId;
+      } else if (req.user.role === 'MANAGER') {
+        // Managers can see requests in their team
+        filters.teamId = req.user.teamId;
+      } else if (teamId) {
+        // Admins can filter by specific team
+        filters.teamId = parseInt(teamId);
+      }
+
+      const result = await RequestService.getRequests(filters);
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get overdue maintenance requests
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async getOverdueRequests(req, res, next) {
+    try {
+      let filters = {
+        overdue: true,
+        page: parseInt(req.query.page) || 1,
+        limit: parseInt(req.query.limit) || 20,
+        type: req.query.type
+      };
+
+      // Apply role-based filtering
+      if (req.user.role === 'TECHNICIAN') {
+        // Technicians can only see requests in their team or assigned to them
+        filters.teamId = req.user.teamId;
+      } else if (req.user.role === 'MANAGER') {
+        // Managers can see requests in their team
+        filters.teamId = req.user.teamId;
+      } else if (req.query.teamId) {
+        // Admins can filter by specific team
+        filters.teamId = parseInt(req.query.teamId);
+      }
+
+      const result = await RequestService.getRequests(filters);
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 module.exports = RequestController;

@@ -40,12 +40,37 @@ const validateRequestCreation = [
     .isISO8601()
     .withMessage('Scheduled date must be a valid ISO 8601 date')
     .custom((value, { req }) => {
-      if (req.body.type === MAINTENANCE_TYPES.PREVENTIVE && !value) {
+      const type = req.body.type;
+      
+      // Preventive maintenance requires scheduled date
+      if (type === MAINTENANCE_TYPES.PREVENTIVE && !value) {
         throw new Error('Scheduled date is required for preventive maintenance');
       }
-      if (value && new Date(value) < new Date()) {
-        throw new Error('Scheduled date cannot be in the past');
+      
+      if (value) {
+        const scheduledDate = new Date(value);
+        const now = new Date();
+        
+        // For preventive maintenance, scheduled date cannot be in the past (allow same day)
+        if (type === MAINTENANCE_TYPES.PREVENTIVE) {
+          const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          if (scheduledDate < today) {
+            throw new Error('Scheduled date cannot be in the past for preventive maintenance');
+          }
+          
+          // Cannot be more than 2 years in the future
+          const maxFutureDate = new Date(now.getTime() + (2 * 365 * 24 * 60 * 60 * 1000));
+          if (scheduledDate > maxFutureDate) {
+            throw new Error('Scheduled date cannot be more than 2 years in the future');
+          }
+        }
+        
+        // For corrective maintenance, scheduled date should not be in the future
+        if (type === MAINTENANCE_TYPES.CORRECTIVE && scheduledDate > now) {
+          throw new Error('Corrective maintenance cannot be scheduled for future dates');
+        }
       }
+      
       return true;
     }),
 
@@ -398,6 +423,101 @@ const validatePaginationQuery = [
   }
 ];
 
+/**
+ * Validation rules for calendar view query parameters
+ */
+const validateCalendarQuery = [
+  (req, res, next) => {
+    // Start date validation
+    if (req.query.startDate) {
+      const startDate = new Date(req.query.startDate);
+      if (isNaN(startDate.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'startDate must be a valid date',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    // End date validation
+    if (req.query.endDate) {
+      const endDate = new Date(req.query.endDate);
+      if (isNaN(endDate.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'endDate must be a valid date',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    // Validate date range
+    if (req.query.startDate && req.query.endDate) {
+      const startDate = new Date(req.query.startDate);
+      const endDate = new Date(req.query.endDate);
+      if (startDate > endDate) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'startDate must be before endDate',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+
+      // Limit date range to maximum 1 year
+      const maxRange = 365 * 24 * 60 * 60 * 1000; // 1 year in milliseconds
+      if (endDate.getTime() - startDate.getTime() > maxRange) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Date range cannot exceed 1 year',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    // Team ID validation
+    if (req.query.teamId) {
+      const teamId = parseInt(req.query.teamId);
+      if (isNaN(teamId) || teamId < 1) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Team ID must be a positive integer',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    // Type validation
+    if (req.query.type && !Object.values(MAINTENANCE_TYPES).includes(req.query.type)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: `Type must be one of: ${Object.values(MAINTENANCE_TYPES).join(', ')}`,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    next();
+  }
+];
+
 module.exports = {
   validateRequestCreation,
   validateRequestAssignment,
@@ -405,5 +525,6 @@ module.exports = {
   validateRequestCompletion,
   validateRequestIdParam,
   validateTeamIdParam,
-  validatePaginationQuery
+  validatePaginationQuery,
+  validateCalendarQuery
 };

@@ -15,7 +15,8 @@ const {
   validateRequestCompletion,
   validateRequestIdParam,
   validateTeamIdParam,
-  validatePaginationQuery
+  validatePaginationQuery,
+  validateCalendarQuery
 } = require('../middleware/requestValidation');
 
 const router = express.Router();
@@ -68,6 +69,42 @@ router.get(
   '/technician/dashboard',
   requireRoles('TECHNICIAN'),
   RequestController.getTechnicianDashboard
+);
+
+/**
+ * @route   GET /api/requests/calendar
+ * @desc    Get calendar view data for scheduled maintenance requests
+ * @access  All authenticated users (filtered by role)
+ */
+router.get(
+  '/calendar',
+  requireAuthenticated(),
+  validateCalendarQuery,
+  RequestController.getCalendarView
+);
+
+/**
+ * @route   GET /api/requests/scheduled
+ * @desc    Get scheduled maintenance requests for a date range
+ * @access  All authenticated users (filtered by role)
+ */
+router.get(
+  '/scheduled',
+  requireAuthenticated(),
+  validatePaginationQuery,
+  RequestController.getScheduledRequests
+);
+
+/**
+ * @route   GET /api/requests/overdue
+ * @desc    Get overdue maintenance requests
+ * @access  All authenticated users (filtered by role)
+ */
+router.get(
+  '/overdue',
+  requireAuthenticated(),
+  validatePaginationQuery,
+  RequestController.getOverdueRequests
 );
 
 /**
