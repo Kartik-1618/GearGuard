@@ -11,16 +11,21 @@ class LogService {
    * @param {Object} options - Query options
    * @param {number} [options.page] - Page number
    * @param {number} [options.limit] - Items per page
+   * @param {Object} [options.user] - User context for access control
    * @returns {Promise<Object>} Request logs with pagination
    */
   static async getRequestLogs(requestId, options = {}) {
-    const { page = 1, limit = 50 } = options;
+    const { page = 1, limit = 50, user } = options;
     const skip = (page - 1) * limit;
 
-    // Verify request exists
+    // Verify request exists and get team info for access control
     const request = await prisma.maintenanceRequest.findUnique({
       where: { id: requestId },
-      select: { id: true }
+      select: { 
+        id: true,
+        teamId: true,
+        assignedTo: true
+      }
     });
 
     if (!request) {
@@ -28,6 +33,28 @@ class LogService {
       error.code = ERROR_CODES.REQUEST_NOT_FOUND;
       error.statusCode = 404;
       throw error;
+    }
+
+    // Apply access control if user context is provided
+    if (user) {
+      if (user.role === 'TECHNICIAN') {
+        // Technicians can only view logs for requests assigned to them or in their team
+        if (request.assignedTo !== user.id && request.teamId !== user.teamId) {
+          const error = new Error('Access denied: You can only view logs for requests assigned to you or in your team');
+          error.code = ERROR_CODES.ACCESS_DENIED;
+          error.statusCode = 403;
+          throw error;
+        }
+      } else if (user.role === 'MANAGER') {
+        // Managers can only view logs for requests in their team
+        if (request.teamId !== user.teamId) {
+          const error = new Error('Access denied: Request belongs to different team');
+          error.code = ERROR_CODES.TEAM_ACCESS_DENIED;
+          error.statusCode = 403;
+          throw error;
+        }
+      }
+      // Admins can view any request logs
     }
 
     const [logs, total] = await Promise.all([
@@ -71,6 +98,7 @@ class LogService {
    * @param {number} [filters.limit] - Items per page
    * @param {number} [filters.requestId] - Filter by request ID
    * @param {number} [filters.userId] - Filter by user ID
+   * @param {number} [filters.teamId] - Filter by team ID
    * @param {string} [filters.status] - Filter by new status
    * @param {string} [filters.fromDate] - Filter from date
    * @param {string} [filters.toDate] - Filter to date
@@ -82,6 +110,7 @@ class LogService {
       limit = 50,
       requestId,
       userId,
+      teamId,
       status,
       fromDate,
       toDate
@@ -95,6 +124,13 @@ class LogService {
     if (requestId) where.requestId = requestId;
     if (userId) where.changedBy = userId;
     if (status) where.newStatus = status;
+
+    // Team-based filtering through request relationship
+    if (teamId) {
+      where.request = {
+        teamId: teamId
+      };
+    }
 
     if (fromDate || toDate) {
       where.changedAt = {};

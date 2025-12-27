@@ -5,7 +5,8 @@ const {
   requireAuthenticated,
   requireRequestCreation,
   requireRequestAssignment,
-  requireRequestStatusUpdate
+  requireRequestStatusUpdate,
+  requireRoles
 } = require('../middleware/rbac');
 const {
   validateRequestCreation,
@@ -56,6 +57,41 @@ router.get(
   requireAuthenticated(),
   validatePaginationQuery,
   RequestController.getMyRequests
+);
+
+/**
+ * @route   GET /api/requests/technician/dashboard
+ * @desc    Get technician dashboard data with statistics
+ * @access  Technicians only
+ */
+router.get(
+  '/technician/dashboard',
+  requireRoles('TECHNICIAN'),
+  RequestController.getTechnicianDashboard
+);
+
+/**
+ * @route   PATCH /api/requests/my/:id/status
+ * @desc    Update status of assigned request (technician-friendly)
+ * @access  Technicians (assigned requests only)
+ */
+router.patch(
+  '/my/:id/status',
+  requireAuthenticated(),
+  validateStatusUpdate,
+  RequestController.updateMyRequestStatus
+);
+
+/**
+ * @route   PATCH /api/requests/my/:id/complete
+ * @desc    Complete assigned request (technician-friendly)
+ * @access  Technicians (assigned requests only)
+ */
+router.patch(
+  '/my/:id/complete',
+  requireAuthenticated(),
+  validateRequestCompletion,
+  RequestController.completeMyRequest
 );
 
 /**

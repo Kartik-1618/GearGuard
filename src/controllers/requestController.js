@@ -239,7 +239,10 @@ class RequestController {
         assignedTo: req.user.id,
         status: req.query.status,
         type: req.query.type,
-        search: req.query.search
+        search: req.query.search,
+        scheduledDateFrom: req.query.scheduledDateFrom,
+        scheduledDateTo: req.query.scheduledDateTo,
+        overdue: req.query.overdue === 'true'
       };
 
       const result = await RequestService.getRequests(filters);
@@ -247,6 +250,103 @@ class RequestController {
       res.status(HTTP_STATUS.OK).json({
         success: true,
         data: result
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get technician dashboard data with request statistics
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async getTechnicianDashboard(req, res, next) {
+    try {
+      const technicianId = req.user.id;
+      const teamId = req.user.teamId;
+
+      // Get technician's assigned requests with statistics
+      const dashboardData = await RequestService.getTechnicianDashboard(technicianId, teamId);
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: dashboardData
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Update request status (technician-friendly endpoint)
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async updateMyRequestStatus(req, res, next) {
+    try {
+      const requestId = parseInt(req.params.id);
+      const { status } = req.body;
+
+      // Verify the request is assigned to the current technician
+      const request = await RequestService.getRequestById(requestId);
+      
+      if (req.user.role === 'TECHNICIAN' && request.assignedTo !== req.user.id) {
+        return res.status(HTTP_STATUS.FORBIDDEN).json({
+          success: false,
+          error: {
+            code: 'ACCESS_DENIED',
+            message: 'You can only update requests assigned to you',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+
+      const updatedRequest = await RequestService.updateStatus(requestId, status, req.user.id);
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        message: SUCCESS_MESSAGES.REQUEST_UPDATED,
+        data: updatedRequest
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Complete request (technician-friendly endpoint)
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async completeMyRequest(req, res, next) {
+    try {
+      const requestId = parseInt(req.params.id);
+      const { durationHours } = req.body;
+
+      // Verify the request is assigned to the current technician
+      const request = await RequestService.getRequestById(requestId);
+      
+      if (req.user.role === 'TECHNICIAN' && request.assignedTo !== req.user.id) {
+        return res.status(HTTP_STATUS.FORBIDDEN).json({
+          success: false,
+          error: {
+            code: 'ACCESS_DENIED',
+            message: 'You can only complete requests assigned to you',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+
+      const completedRequest = await RequestService.completeRequest(requestId, durationHours, req.user.id);
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        message: SUCCESS_MESSAGES.REQUEST_COMPLETED,
+        data: completedRequest
       });
     } catch (error) {
       next(error);

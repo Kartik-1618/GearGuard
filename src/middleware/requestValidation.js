@@ -337,6 +337,63 @@ const validatePaginationQuery = [
       }
     }
 
+    // Date filtering validation
+    if (req.query.scheduledDateFrom) {
+      const dateFrom = new Date(req.query.scheduledDateFrom);
+      if (isNaN(dateFrom.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'scheduledDateFrom must be a valid date',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    if (req.query.scheduledDateTo) {
+      const dateTo = new Date(req.query.scheduledDateTo);
+      if (isNaN(dateTo.getTime())) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'scheduledDateTo must be a valid date',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    // Validate date range
+    if (req.query.scheduledDateFrom && req.query.scheduledDateTo) {
+      const dateFrom = new Date(req.query.scheduledDateFrom);
+      const dateTo = new Date(req.query.scheduledDateTo);
+      if (dateFrom > dateTo) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'scheduledDateFrom must be before scheduledDateTo',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    // Overdue filter validation
+    if (req.query.overdue && !['true', 'false'].includes(req.query.overdue)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'overdue must be true or false',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
     next();
   }
 ];

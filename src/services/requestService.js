@@ -1,4 +1,5 @@
 const { prisma } = require('../models');
+const LogService = require('./logService');
 const { ERROR_CODES, MAINTENANCE_STATUS, MAINTENANCE_TYPES } = require('../utils/constants');
 
 /**
@@ -122,7 +123,7 @@ class RequestService {
     });
 
     // Create initial log entry
-    await this.createLogEntry(request.id, null, MAINTENANCE_STATUS.NEW, createdBy);
+    await LogService.createLogEntry(request.id, null, MAINTENANCE_STATUS.NEW, createdBy);
 
     return request;
   }
@@ -221,7 +222,7 @@ class RequestService {
     });
 
     // Create log entry for assignment
-    await this.createLogEntry(requestId, request.status, MAINTENANCE_STATUS.IN_PROGRESS, assignedBy);
+    await LogService.createLogEntry(requestId, request.status, MAINTENANCE_STATUS.IN_PROGRESS, assignedBy);
 
     return updatedRequest;
   }
@@ -332,7 +333,7 @@ class RequestService {
     });
 
     // Create log entry
-    await this.createLogEntry(requestId, oldStatus, newStatus, userId);
+    await LogService.createLogEntry(requestId, oldStatus, newStatus, userId);
 
     return updatedRequest;
   }
@@ -446,7 +447,7 @@ class RequestService {
     });
 
     // Create log entry
-    await this.createLogEntry(requestId, oldStatus, MAINTENANCE_STATUS.REPAIRED, userId);
+    await LogService.createLogEntry(requestId, oldStatus, MAINTENANCE_STATUS.REPAIRED, userId);
 
     return updatedRequest;
   }
@@ -556,7 +557,7 @@ class RequestService {
     });
 
     // Create log entry
-    await this.createLogEntry(requestId, oldStatus, MAINTENANCE_STATUS.SCRAP, userId);
+    await LogService.createLogEntry(requestId, oldStatus, MAINTENANCE_STATUS.SCRAP, userId);
 
     return result;
   }
@@ -572,6 +573,9 @@ class RequestService {
    * @param {string} [filters.type] - Filter by maintenance type
    * @param {number} [filters.equipmentId] - Filter by equipment ID
    * @param {string} [filters.search] - Search term for subject
+   * @param {string} [filters.scheduledDateFrom] - Filter by scheduled date from
+   * @param {string} [filters.scheduledDateTo] - Filter by scheduled date to
+   * @param {boolean} [filters.overdue] - Filter overdue requests
    * @returns {Promise<Object>} Requests list with pagination
    */
   static async getRequests(filters = {}) {
@@ -583,7 +587,10 @@ class RequestService {
       status,
       type,
       equipmentId,
-      search
+      search,
+      scheduledDateFrom,
+      scheduledDateTo,
+      overdue
     } = filters;
 
     const skip = (page - 1) * limit;
@@ -602,6 +609,27 @@ class RequestService {
         { subject: { contains: search, mode: 'insensitive' } },
         { description: { contains: search, mode: 'insensitive' } }
       ];
+    }
+
+    // Date filtering
+    if (scheduledDateFrom || scheduledDateTo) {
+      where.scheduledDate = {};
+      if (scheduledDateFrom) {
+        where.scheduledDate.gte = new Date(scheduledDateFrom);
+      }
+      if (scheduledDateTo) {
+        where.scheduledDate.lte = new Date(scheduledDateTo);
+      }
+    }
+
+    // Overdue filtering (scheduled date is in the past and status is not REPAIRED or SCRAP)
+    if (overdue) {
+      where.scheduledDate = {
+        lt: new Date()
+      };
+      where.status = {
+        notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+      };
     }
 
     const [requests, total] = await Promise.all([
@@ -654,6 +682,166 @@ class RequestService {
         total,
         pages: Math.ceil(total / limit)
       }
+    };
+  }
+
+  /**
+   * Get technician dashboard data with request statistics
+   * @param {number} technicianId - Technician user ID
+   * @param {number} teamId - Team ID
+   * @returns {Promise<Object>} Dashboard data with statistics
+   */
+  static async getTechnicianDashboard(technicianId, teamId) {
+    const now = new Date();
+
+    // Get assigned requests statistics
+    const [
+      assignedRequests,
+      newRequests,
+      inProgressRequests,
+      completedThisWeek,
+      overdueRequests,
+      upcomingPreventive
+    ] = await Promise.all([
+      // All assigned requests
+      prisma.maintenanceRequest.findMany({
+        where: {
+          assignedTo: technicianId,
+          status: {
+            notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+          }
+        },
+        include: {
+          equipment: {
+            select: {
+              id: true,
+              name: true,
+              serialNumber: true
+            }
+          }
+        },
+        orderBy: [
+          { status: 'asc' },
+          { scheduledDate: 'asc' },
+          { createdAt: 'desc' }
+        ]
+      }),
+
+      // New requests in team (unassigned)
+      prisma.maintenanceRequest.findMany({
+        where: {
+          teamId: teamId,
+          assignedTo: null,
+          status: MAINTENANCE_STATUS.NEW
+        },
+        include: {
+          equipment: {
+            select: {
+              id: true,
+              name: true,
+              serialNumber: true
+            }
+          }
+        },
+        orderBy: {
+          createdAt: 'desc'
+        },
+        take: 5
+      }),
+
+      // In-progress requests count
+      prisma.maintenanceRequest.count({
+        where: {
+          assignedTo: technicianId,
+          status: MAINTENANCE_STATUS.IN_PROGRESS
+        }
+      }),
+
+      // Completed this week
+      prisma.maintenanceRequest.count({
+        where: {
+          assignedTo: technicianId,
+          status: MAINTENANCE_STATUS.REPAIRED,
+          updatedAt: {
+            gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+          }
+        }
+      }),
+
+      // Overdue requests
+      prisma.maintenanceRequest.findMany({
+        where: {
+          assignedTo: technicianId,
+          scheduledDate: {
+            lt: now
+          },
+          status: {
+            notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+          }
+        },
+        include: {
+          equipment: {
+            select: {
+              id: true,
+              name: true,
+              serialNumber: true
+            }
+          }
+        },
+        orderBy: {
+          scheduledDate: 'asc'
+        }
+      }),
+
+      // Upcoming preventive maintenance (next 7 days)
+      prisma.maintenanceRequest.findMany({
+        where: {
+          OR: [
+            { assignedTo: technicianId },
+            { teamId: teamId, assignedTo: null }
+          ],
+          type: MAINTENANCE_TYPES.PREVENTIVE,
+          scheduledDate: {
+            gte: now,
+            lte: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+          },
+          status: {
+            notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+          }
+        },
+        include: {
+          equipment: {
+            select: {
+              id: true,
+              name: true,
+              serialNumber: true
+            }
+          },
+          assignee: {
+            select: {
+              id: true,
+              name: true
+            }
+          }
+        },
+        orderBy: {
+          scheduledDate: 'asc'
+        }
+      })
+    ]);
+
+    return {
+      statistics: {
+        totalAssigned: assignedRequests.length,
+        inProgress: inProgressRequests,
+        completedThisWeek: completedThisWeek,
+        overdue: overdueRequests.length,
+        upcomingPreventive: upcomingPreventive.length
+      },
+      assignedRequests: assignedRequests.slice(0, 10), // Limit to 10 most recent
+      newTeamRequests: newRequests,
+      overdueRequests,
+      upcomingPreventive
     };
   }
 
@@ -726,25 +914,6 @@ class RequestService {
     }
 
     return request;
-  }
-
-  /**
-   * Create log entry for status changes
-   * @param {number} requestId - Request ID
-   * @param {string} oldStatus - Previous status
-   * @param {string} newStatus - New status
-   * @param {number} userId - User making the change
-   * @returns {Promise<Object>} Created log entry
-   */
-  static async createLogEntry(requestId, oldStatus, newStatus, userId) {
-    return await prisma.requestLog.create({
-      data: {
-        requestId,
-        oldStatus,
-        newStatus,
-        changedBy: userId
-      }
-    });
   }
 
   /**
