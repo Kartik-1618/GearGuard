@@ -113,4 +113,23 @@ class AuthService {
     const user = await prisma.user.findUnique({
       where: { id: userId },
       include: {
-       
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // Remove password from user object
+    const { password: _, ...userWithoutPassword } = user;
+    return userWithoutPassword;
+  }
+}
+
+module.exports = AuthService;

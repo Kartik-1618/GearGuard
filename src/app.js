@@ -49,11 +49,23 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API routes will be added here in future tasks
+// Import routes
+const userRoutes = require('./routes/userRoutes');
+const teamRoutes = require('./routes/teamRoutes');
+const equipmentRoutes = require('./routes/equipmentRoutes');
+const requestRoutes = require('./routes/requestRoutes');
+
+// API routes
+app.use('/api/v1/users', userRoutes);
+app.use('/api/v1/teams', teamRoutes);
+app.use('/api/v1/equipment', equipmentRoutes);
+app.use('/api/v1/requests', requestRoutes);
+
+// Default API route for unmatched endpoints
 app.use('/api/v1', (req, res) => {
   res.json({
     success: true,
-    message: 'GearGuard API v1 - Routes will be implemented in upcoming tasks',
+    message: 'GearGuard API v1 - Available endpoints: /users, /teams, /equipment, /requests',
     timestamp: new Date().toISOString()
   });
 });

@@ -1,0 +1,773 @@
+const { prisma } = require('../models');
+const { ERROR_CODES, MAINTENANCE_STATUS, MAINTENANCE_TYPES } = require('../utils/constants');
+
+/**
+ * Maintenance Request service handling request management operations
+ */
+class RequestService {
+  /**
+   * Create new maintenance request
+   * @param {Object} requestData - Request data
+   * @param {string} requestData.subject - Request subject
+   * @param {string} requestData.description - Request description
+   * @param {string} requestData.type - Maintenance type (CORRECTIVE/PREVENTIVE)
+   * @param {number} requestData.equipmentId - Equipment ID
+   * @param {string} [requestData.scheduledDate] - Scheduled date for preventive maintenance
+   * @param {number} requestData.createdBy - User ID who created the request
+   * @returns {Promise<Object>} Created maintenance request
+   */
+  static async createRequest(requestData) {
+    const {
+      subject,
+      description,
+      type,
+      equipmentId,
+      scheduledDate,
+      createdBy
+    } = requestData;
+
+    // Validate equipment exists and is not scrapped
+    const equipment = await prisma.equipment.findUnique({
+      where: { id: equipmentId },
+      select: {
+        id: true,
+        name: true,
+        isScrapped: true,
+        teamId: true,
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+
+    if (!equipment) {
+      const error = new Error('Equipment not found');
+      error.code = ERROR_CODES.EQUIPMENT_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (equipment.isScrapped) {
+      const error = new Error('Cannot create maintenance request for scrapped equipment');
+      error.code = ERROR_CODES.EQUIPMENT_SCRAPPED;
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // Validate creator exists
+    const creator = await prisma.user.findUnique({
+      where: { id: createdBy },
+      select: { id: true, name: true, role: true }
+    });
+
+    if (!creator) {
+      const error = new Error('Creator user not found');
+      error.code = ERROR_CODES.USER_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    // Validate scheduled date for preventive maintenance
+    if (type === MAINTENANCE_TYPES.PREVENTIVE && !scheduledDate) {
+      const error = new Error('Scheduled date is required for preventive maintenance');
+      error.code = ERROR_CODES.VALIDATION_ERROR;
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // Create maintenance request with automatic team assignment
+    const request = await prisma.maintenanceRequest.create({
+      data: {
+        subject,
+        description,
+        type,
+        equipmentId,
+        teamId: equipment.teamId, // Automatic team assignment based on equipment
+        scheduledDate: scheduledDate ? new Date(scheduledDate) : null,
+        createdBy,
+        status: MAINTENANCE_STATUS.NEW
+      },
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            name: true,
+            serialNumber: true
+          }
+        },
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        creator: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        }
+      }
+    });
+
+    // Create initial log entry
+    await this.createLogEntry(request.id, null, MAINTENANCE_STATUS.NEW, createdBy);
+
+    return request;
+  }
+
+  /**
+   * Assign maintenance request to technician
+   * @param {number} requestId - Request ID
+   * @param {number} technicianId - Technician user ID
+   * @param {number} assignedBy - User ID who assigned the request
+   * @returns {Promise<Object>} Updated maintenance request
+   */
+  static async assignRequest(requestId, technicianId, assignedBy) {
+    // Get request with team info
+    const request = await prisma.maintenanceRequest.findUnique({
+      where: { id: requestId },
+      include: {
+        team: { select: { id: true } }
+      }
+    });
+
+    if (!request) {
+      const error = new Error('Maintenance request not found');
+      error.code = ERROR_CODES.REQUEST_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    // Validate technician exists and belongs to same team
+    const technician = await prisma.user.findUnique({
+      where: { id: technicianId },
+      select: {
+        id: true,
+        name: true,
+        role: true,
+        teamId: true
+      }
+    });
+
+    if (!technician) {
+      const error = new Error('Technician not found');
+      error.code = ERROR_CODES.USER_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (technician.role !== 'TECHNICIAN') {
+      const error = new Error('User must be a technician to be assigned maintenance requests');
+      error.code = ERROR_CODES.VALIDATION_ERROR;
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (technician.teamId !== request.teamId) {
+      const error = new Error('Technician must belong to the same team as the equipment');
+      error.code = ERROR_CODES.TEAM_ASSIGNMENT_MISMATCH;
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // Update request assignment and status
+    const updatedRequest = await prisma.maintenanceRequest.update({
+      where: { id: requestId },
+      data: {
+        assignedTo: technicianId,
+        status: MAINTENANCE_STATUS.IN_PROGRESS
+      },
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            name: true,
+            serialNumber: true
+          }
+        },
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        creator: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        }
+      }
+    });
+
+    // Create log entry for assignment
+    await this.createLogEntry(requestId, request.status, MAINTENANCE_STATUS.IN_PROGRESS, assignedBy);
+
+    return updatedRequest;
+  }
+
+  /**
+   * Update maintenance request status
+   * @param {number} requestId - Request ID
+   * @param {string} newStatus - New status
+   * @param {number} userId - User ID making the change
+   * @returns {Promise<Object>} Updated maintenance request
+   */
+  static async updateStatus(requestId, newStatus, userId) {
+    const request = await prisma.maintenanceRequest.findUnique({
+      where: { id: requestId },
+      select: {
+        id: true,
+        status: true,
+        assignedTo: true,
+        teamId: true
+      }
+    });
+
+    if (!request) {
+      const error = new Error('Maintenance request not found');
+      error.code = ERROR_CODES.REQUEST_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    // Validate status transition
+    this.validateStatusTransition(request.status, newStatus);
+
+    // Validate user permissions for status update
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true, teamId: true }
+    });
+
+    if (!user) {
+      const error = new Error('User not found');
+      error.code = ERROR_CODES.USER_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    // Check permissions based on role and assignment
+    if (user.role === 'TECHNICIAN') {
+      // Technicians can only update requests assigned to them
+      if (request.assignedTo !== userId) {
+        const error = new Error('Technicians can only update requests assigned to them');
+        error.code = ERROR_CODES.INSUFFICIENT_PERMISSIONS;
+        error.statusCode = 403;
+        throw error;
+      }
+      // Technicians can only update to REPAIRED or SCRAP
+      if (![MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP].includes(newStatus)) {
+        const error = new Error('Technicians can only mark requests as REPAIRED or SCRAP');
+        error.code = ERROR_CODES.INVALID_STATUS_TRANSITION;
+        error.statusCode = 400;
+        throw error;
+      }
+    } else if (user.role === 'MANAGER') {
+      // Managers can only update requests in their team
+      if (user.teamId !== request.teamId) {
+        const error = new Error('Managers can only update requests in their team');
+        error.code = ERROR_CODES.TEAM_ACCESS_DENIED;
+        error.statusCode = 403;
+        throw error;
+      }
+    }
+    // Admins can update any request
+
+    const oldStatus = request.status;
+
+    // Update request status
+    const updatedRequest = await prisma.maintenanceRequest.update({
+      where: { id: requestId },
+      data: { status: newStatus },
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            name: true,
+            serialNumber: true
+          }
+        },
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        creator: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        }
+      }
+    });
+
+    // Create log entry
+    await this.createLogEntry(requestId, oldStatus, newStatus, userId);
+
+    return updatedRequest;
+  }
+
+  /**
+   * Complete maintenance request with duration
+   * @param {number} requestId - Request ID
+   * @param {number} durationHours - Duration in hours
+   * @param {number} userId - User ID completing the request
+   * @returns {Promise<Object>} Updated maintenance request
+   */
+  static async completeRequest(requestId, durationHours, userId) {
+    const request = await prisma.maintenanceRequest.findUnique({
+      where: { id: requestId },
+      select: {
+        id: true,
+        status: true,
+        assignedTo: true,
+        teamId: true
+      }
+    });
+
+    if (!request) {
+      const error = new Error('Maintenance request not found');
+      error.code = ERROR_CODES.REQUEST_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    // Validate current status allows completion
+    if (request.status !== MAINTENANCE_STATUS.IN_PROGRESS) {
+      const error = new Error('Only in-progress requests can be completed');
+      error.code = ERROR_CODES.INVALID_STATUS_TRANSITION;
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // Validate user permissions
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true, teamId: true }
+    });
+
+    if (!user) {
+      const error = new Error('User not found');
+      error.code = ERROR_CODES.USER_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (user.role === 'TECHNICIAN' && request.assignedTo !== userId) {
+      const error = new Error('Technicians can only complete requests assigned to them');
+      error.code = ERROR_CODES.INSUFFICIENT_PERMISSIONS;
+      error.statusCode = 403;
+      throw error;
+    }
+
+    if (user.role === 'MANAGER' && user.teamId !== request.teamId) {
+      const error = new Error('Managers can only complete requests in their team');
+      error.code = ERROR_CODES.TEAM_ACCESS_DENIED;
+      error.statusCode = 403;
+      throw error;
+    }
+
+    // Validate duration
+    if (!durationHours || durationHours <= 0) {
+      const error = new Error('Duration in hours is required and must be greater than 0');
+      error.code = ERROR_CODES.VALIDATION_ERROR;
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const oldStatus = request.status;
+
+    // Update request with completion data
+    const updatedRequest = await prisma.maintenanceRequest.update({
+      where: { id: requestId },
+      data: {
+        status: MAINTENANCE_STATUS.REPAIRED,
+        durationHours: parseFloat(durationHours)
+      },
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            name: true,
+            serialNumber: true
+          }
+        },
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        creator: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        }
+      }
+    });
+
+    // Create log entry
+    await this.createLogEntry(requestId, oldStatus, MAINTENANCE_STATUS.REPAIRED, userId);
+
+    return updatedRequest;
+  }
+
+  /**
+   * Scrap maintenance request and associated equipment
+   * @param {number} requestId - Request ID
+   * @param {number} userId - User ID scrapping the request
+   * @returns {Promise<Object>} Updated maintenance request
+   */
+  static async scrapRequest(requestId, userId) {
+    const request = await prisma.maintenanceRequest.findUnique({
+      where: { id: requestId },
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            isScrapped: true
+          }
+        }
+      }
+    });
+
+    if (!request) {
+      const error = new Error('Maintenance request not found');
+      error.code = ERROR_CODES.REQUEST_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    // Validate user permissions
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true, teamId: true }
+    });
+
+    if (!user) {
+      const error = new Error('User not found');
+      error.code = ERROR_CODES.USER_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (user.role === 'TECHNICIAN' && request.assignedTo !== userId) {
+      const error = new Error('Technicians can only scrap requests assigned to them');
+      error.code = ERROR_CODES.INSUFFICIENT_PERMISSIONS;
+      error.statusCode = 403;
+      throw error;
+    }
+
+    if (user.role === 'MANAGER' && user.teamId !== request.teamId) {
+      const error = new Error('Managers can only scrap requests in their team');
+      error.code = ERROR_CODES.TEAM_ACCESS_DENIED;
+      error.statusCode = 403;
+      throw error;
+    }
+
+    const oldStatus = request.status;
+
+    // Use transaction to update both request and equipment
+    const result = await prisma.$transaction(async (tx) => {
+      // Update request status to SCRAP
+      const updatedRequest = await tx.maintenanceRequest.update({
+        where: { id: requestId },
+        data: { status: MAINTENANCE_STATUS.SCRAP },
+        include: {
+          equipment: {
+            select: {
+              id: true,
+              name: true,
+              serialNumber: true,
+              isScrapped: true
+            }
+          },
+          team: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          creator: {
+            select: {
+              id: true,
+              name: true,
+              role: true
+            }
+          },
+          assignee: {
+            select: {
+              id: true,
+              name: true,
+              role: true
+            }
+          }
+        }
+      });
+
+      // Scrap the associated equipment if not already scrapped
+      if (!request.equipment.isScrapped) {
+        await tx.equipment.update({
+          where: { id: request.equipmentId },
+          data: { isScrapped: true }
+        });
+      }
+
+      return updatedRequest;
+    });
+
+    // Create log entry
+    await this.createLogEntry(requestId, oldStatus, MAINTENANCE_STATUS.SCRAP, userId);
+
+    return result;
+  }
+
+  /**
+   * Get maintenance requests with filtering and pagination
+   * @param {Object} filters - Filter options
+   * @param {number} [filters.page] - Page number
+   * @param {number} [filters.limit] - Items per page
+   * @param {number} [filters.teamId] - Filter by team ID
+   * @param {number} [filters.assignedTo] - Filter by assigned technician
+   * @param {string} [filters.status] - Filter by status
+   * @param {string} [filters.type] - Filter by maintenance type
+   * @param {number} [filters.equipmentId] - Filter by equipment ID
+   * @param {string} [filters.search] - Search term for subject
+   * @returns {Promise<Object>} Requests list with pagination
+   */
+  static async getRequests(filters = {}) {
+    const {
+      page = 1,
+      limit = 20,
+      teamId,
+      assignedTo,
+      status,
+      type,
+      equipmentId,
+      search
+    } = filters;
+
+    const skip = (page - 1) * limit;
+
+    // Build where clause
+    const where = {};
+
+    if (teamId) where.teamId = teamId;
+    if (assignedTo) where.assignedTo = assignedTo;
+    if (status) where.status = status;
+    if (type) where.type = type;
+    if (equipmentId) where.equipmentId = equipmentId;
+
+    if (search) {
+      where.OR = [
+        { subject: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } }
+      ];
+    }
+
+    const [requests, total] = await Promise.all([
+      prisma.maintenanceRequest.findMany({
+        where,
+        skip,
+        take: limit,
+        include: {
+          equipment: {
+            select: {
+              id: true,
+              name: true,
+              serialNumber: true
+            }
+          },
+          team: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          creator: {
+            select: {
+              id: true,
+              name: true,
+              role: true
+            }
+          },
+          assignee: {
+            select: {
+              id: true,
+              name: true,
+              role: true
+            }
+          }
+        },
+        orderBy: [
+          { status: 'asc' },
+          { createdAt: 'desc' }
+        ]
+      }),
+      prisma.maintenanceRequest.count({ where })
+    ]);
+
+    return {
+      requests,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    };
+  }
+
+  /**
+   * Get maintenance request by ID
+   * @param {number} requestId - Request ID
+   * @param {boolean} [includeLogs] - Include request logs
+   * @returns {Promise<Object>} Maintenance request with related data
+   */
+  static async getRequestById(requestId, includeLogs = false) {
+    const include = {
+      equipment: {
+        select: {
+          id: true,
+          name: true,
+          serialNumber: true,
+          department: true,
+          location: true
+        }
+      },
+      team: {
+        select: {
+          id: true,
+          name: true
+        }
+      },
+      creator: {
+        select: {
+          id: true,
+          name: true,
+          role: true
+        }
+      },
+      assignee: {
+        select: {
+          id: true,
+          name: true,
+          role: true
+        }
+      }
+    };
+
+    if (includeLogs) {
+      include.logs = {
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              role: true
+            }
+          }
+        },
+        orderBy: {
+          changedAt: 'desc'
+        }
+      };
+    }
+
+    const request = await prisma.maintenanceRequest.findUnique({
+      where: { id: requestId },
+      include
+    });
+
+    if (!request) {
+      const error = new Error('Maintenance request not found');
+      error.code = ERROR_CODES.REQUEST_NOT_FOUND;
+      error.statusCode = 404;
+      throw error;
+    }
+
+    return request;
+  }
+
+  /**
+   * Create log entry for status changes
+   * @param {number} requestId - Request ID
+   * @param {string} oldStatus - Previous status
+   * @param {string} newStatus - New status
+   * @param {number} userId - User making the change
+   * @returns {Promise<Object>} Created log entry
+   */
+  static async createLogEntry(requestId, oldStatus, newStatus, userId) {
+    return await prisma.requestLog.create({
+      data: {
+        requestId,
+        oldStatus,
+        newStatus,
+        changedBy: userId
+      }
+    });
+  }
+
+  /**
+   * Validate status transition
+   * @param {string} currentStatus - Current status
+   * @param {string} newStatus - New status
+   * @throws {Error} If transition is invalid
+   */
+  static validateStatusTransition(currentStatus, newStatus) {
+    const validTransitions = {
+      [MAINTENANCE_STATUS.NEW]: [MAINTENANCE_STATUS.IN_PROGRESS, MAINTENANCE_STATUS.SCRAP],
+      [MAINTENANCE_STATUS.IN_PROGRESS]: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP],
+      [MAINTENANCE_STATUS.REPAIRED]: [], // Terminal state
+      [MAINTENANCE_STATUS.SCRAP]: [] // Terminal state
+    };
+
+    if (!validTransitions[currentStatus] || !validTransitions[currentStatus].includes(newStatus)) {
+      const error = new Error(`Invalid status transition from ${currentStatus} to ${newStatus}`);
+      error.code = ERROR_CODES.INVALID_STATUS_TRANSITION;
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+}
+
+module.exports = RequestService;
