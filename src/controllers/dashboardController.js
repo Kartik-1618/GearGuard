@@ -121,6 +121,106 @@ class DashboardController {
       next(error);
     }
   }
+
+  /**
+   * Get reports for requests grouped by team
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async getRequestsByTeamReport(req, res, next) {
+    try {
+      const { startDate, endDate } = req.query;
+
+      // Only admins can view all teams, managers see their team only
+      let teamId = null;
+      if (req.user.role === 'MANAGER') {
+        teamId = req.user.teamId;
+      } else if (req.query.teamId) {
+        teamId = parseInt(req.query.teamId);
+      }
+
+      const report = await RequestService.getRequestsByTeamReport({
+        teamId,
+        startDate,
+        endDate
+      });
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: report
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get reports for requests grouped by equipment
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async getRequestsByEquipmentReport(req, res, next) {
+    try {
+      const { startDate, endDate } = req.query;
+      let teamId = null;
+
+      // Apply role-based filtering
+      if (req.user.role === 'TECHNICIAN') {
+        teamId = req.user.teamId;
+      } else if (req.user.role === 'MANAGER') {
+        teamId = req.user.teamId;
+      } else if (req.query.teamId) {
+        // Admins can filter by specific team
+        teamId = parseInt(req.query.teamId);
+      }
+
+      const report = await RequestService.getRequestsByEquipmentReport({
+        teamId,
+        startDate,
+        endDate
+      });
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: report
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get overdue requests report
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @param {Function} next - Express next function
+   */
+  static async getOverdueRequestsReport(req, res, next) {
+    try {
+      let teamId = null;
+
+      // Apply role-based filtering
+      if (req.user.role === 'TECHNICIAN') {
+        teamId = req.user.teamId;
+      } else if (req.user.role === 'MANAGER') {
+        teamId = req.user.teamId;
+      } else if (req.query.teamId) {
+        // Admins can filter by specific team
+        teamId = parseInt(req.query.teamId);
+      }
+
+      const report = await RequestService.getOverdueRequestsReport({ teamId });
+
+      res.status(HTTP_STATUS.OK).json({
+        success: true,
+        data: report
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 module.exports = DashboardController;

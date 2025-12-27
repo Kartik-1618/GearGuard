@@ -1462,6 +1462,371 @@ class RequestService {
       topEquipment
     };
   }
+
+  /**
+   * Get requests grouped by team report
+   * @param {Object} filters - Filter options
+   * @param {number} [filters.teamId] - Filter by specific team ID
+   * @param {string} [filters.startDate] - Start date for report
+   * @param {string} [filters.endDate] - End date for report
+   * @returns {Promise<Object>} Requests grouped by team
+   */
+  static async getRequestsByTeamReport(filters = {}) {
+    const {
+      teamId,
+      startDate,
+      endDate
+    } = filters;
+
+    // Default to current month if no dates provided
+    const now = new Date();
+    const defaultStartDate = startDate ? new Date(startDate) : new Date(now.getFullYear(), now.getMonth(), 1);
+    const defaultEndDate = endDate ? new Date(endDate) : new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    const baseWhere = {
+      createdAt: {
+        gte: defaultStartDate,
+        lte: defaultEndDate
+      }
+    };
+
+    if (teamId) baseWhere.teamId = teamId;
+
+    // Get requests grouped by team
+    const requestsByTeam = await prisma.maintenanceRequest.groupBy({
+      by: ['teamId'],
+      where: baseWhere,
+      _count: {
+        id: true
+      },
+      _avg: {
+        durationHours: true
+      }
+    });
+
+    // Get team details
+    const teamIds = requestsByTeam.map(item => item.teamId);
+    const teams = await prisma.team.findMany({
+      where: {
+        id: {
+          in: teamIds
+        }
+      },
+      select: {
+        id: true,
+        name: true
+      }
+    });
+
+    // Get detailed statistics for each team
+    const teamReports = await Promise.all(
+      requestsByTeam.map(async (teamData) => {
+        const team = teams.find(t => t.id === teamData.teamId);
+        
+        // Get status breakdown for this team
+        const statusBreakdown = await prisma.maintenanceRequest.groupBy({
+          by: ['status'],
+          where: {
+            ...baseWhere,
+            teamId: teamData.teamId
+          },
+          _count: {
+            id: true
+          }
+        });
+
+        // Get type breakdown for this team
+        const typeBreakdown = await prisma.maintenanceRequest.groupBy({
+          by: ['type'],
+          where: {
+            ...baseWhere,
+            teamId: teamData.teamId
+          },
+          _count: {
+            id: true
+          }
+        });
+
+        // Get overdue count for this team
+        const overdueCount = await prisma.maintenanceRequest.count({
+          where: {
+            teamId: teamData.teamId,
+            scheduledDate: {
+              lt: now
+            },
+            status: {
+              notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+            }
+          }
+        });
+
+        return {
+          team,
+          totalRequests: teamData._count.id,
+          averageCompletionTime: teamData._avg.durationHours || 0,
+          overdueRequests: overdueCount,
+          statusBreakdown: statusBreakdown.reduce((acc, item) => {
+            acc[item.status.toLowerCase()] = item._count.id;
+            return acc;
+          }, {}),
+          typeBreakdown: typeBreakdown.reduce((acc, item) => {
+            acc[item.type.toLowerCase()] = item._count.id;
+            return acc;
+          }, {})
+        };
+      })
+    );
+
+    return {
+      dateRange: {
+        startDate: defaultStartDate.toISOString().split('T')[0],
+        endDate: defaultEndDate.toISOString().split('T')[0]
+      },
+      teams: teamReports.sort((a, b) => b.totalRequests - a.totalRequests)
+    };
+  }
+
+  /**
+   * Get requests grouped by equipment report
+   * @param {Object} filters - Filter options
+   * @param {number} [filters.teamId] - Filter by team ID
+   * @param {string} [filters.startDate] - Start date for report
+   * @param {string} [filters.endDate] - End date for report
+   * @returns {Promise<Object>} Requests grouped by equipment
+   */
+  static async getRequestsByEquipmentReport(filters = {}) {
+    const {
+      teamId,
+      startDate,
+      endDate
+    } = filters;
+
+    // Default to current month if no dates provided
+    const now = new Date();
+    const defaultStartDate = startDate ? new Date(startDate) : new Date(now.getFullYear(), now.getMonth(), 1);
+    const defaultEndDate = endDate ? new Date(endDate) : new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    const baseWhere = {
+      createdAt: {
+        gte: defaultStartDate,
+        lte: defaultEndDate
+      }
+    };
+
+    if (teamId) baseWhere.teamId = teamId;
+
+    // Get requests grouped by equipment
+    const requestsByEquipment = await prisma.maintenanceRequest.groupBy({
+      by: ['equipmentId'],
+      where: baseWhere,
+      _count: {
+        id: true
+      },
+      _avg: {
+        durationHours: true
+      },
+      orderBy: {
+        _count: {
+          id: 'desc'
+        }
+      }
+    });
+
+    // Get equipment details
+    const equipmentIds = requestsByEquipment.map(item => item.equipmentId);
+    const equipment = await prisma.equipment.findMany({
+      where: {
+        id: {
+          in: equipmentIds
+        }
+      },
+      include: {
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+
+    // Get detailed statistics for each equipment
+    const equipmentReports = await Promise.all(
+      requestsByEquipment.map(async (equipmentData) => {
+        const equipmentInfo = equipment.find(e => e.id === equipmentData.equipmentId);
+        
+        // Get status breakdown for this equipment
+        const statusBreakdown = await prisma.maintenanceRequest.groupBy({
+          by: ['status'],
+          where: {
+            ...baseWhere,
+            equipmentId: equipmentData.equipmentId
+          },
+          _count: {
+            id: true
+          }
+        });
+
+        // Get type breakdown for this equipment
+        const typeBreakdown = await prisma.maintenanceRequest.groupBy({
+          by: ['type'],
+          where: {
+            ...baseWhere,
+            equipmentId: equipmentData.equipmentId
+          },
+          _count: {
+            id: true
+          }
+        });
+
+        // Get overdue count for this equipment
+        const overdueCount = await prisma.maintenanceRequest.count({
+          where: {
+            equipmentId: equipmentData.equipmentId,
+            scheduledDate: {
+              lt: now
+            },
+            status: {
+              notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+            }
+          }
+        });
+
+        return {
+          equipment: {
+            id: equipmentInfo.id,
+            name: equipmentInfo.name,
+            serialNumber: equipmentInfo.serialNumber,
+            department: equipmentInfo.department,
+            location: equipmentInfo.location,
+            team: equipmentInfo.team
+          },
+          totalRequests: equipmentData._count.id,
+          averageCompletionTime: equipmentData._avg.durationHours || 0,
+          overdueRequests: overdueCount,
+          statusBreakdown: statusBreakdown.reduce((acc, item) => {
+            acc[item.status.toLowerCase()] = item._count.id;
+            return acc;
+          }, {}),
+          typeBreakdown: typeBreakdown.reduce((acc, item) => {
+            acc[item.type.toLowerCase()] = item._count.id;
+            return acc;
+          }, {})
+        };
+      })
+    );
+
+    return {
+      dateRange: {
+        startDate: defaultStartDate.toISOString().split('T')[0],
+        endDate: defaultEndDate.toISOString().split('T')[0]
+      },
+      equipment: equipmentReports
+    };
+  }
+
+  /**
+   * Get overdue requests report
+   * @param {Object} filters - Filter options
+   * @param {number} [filters.teamId] - Filter by team ID
+   * @returns {Promise<Object>} Overdue requests report
+   */
+  static async getOverdueRequestsReport(filters = {}) {
+    const { teamId } = filters;
+    const now = new Date();
+
+    const baseWhere = {
+      scheduledDate: {
+        lt: now
+      },
+      status: {
+        notIn: [MAINTENANCE_STATUS.REPAIRED, MAINTENANCE_STATUS.SCRAP]
+      }
+    };
+
+    if (teamId) baseWhere.teamId = teamId;
+
+    // Get overdue requests with details
+    const overdueRequests = await prisma.maintenanceRequest.findMany({
+      where: baseWhere,
+      include: {
+        equipment: {
+          select: {
+            id: true,
+            name: true,
+            serialNumber: true,
+            department: true,
+            location: true
+          }
+        },
+        team: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        },
+        creator: {
+          select: {
+            id: true,
+            name: true,
+            role: true
+          }
+        }
+      },
+      orderBy: {
+        scheduledDate: 'asc'
+      }
+    });
+
+    // Calculate overdue statistics
+    const overdueStats = {
+      total: overdueRequests.length,
+      byType: {},
+      byTeam: {},
+      byStatus: {},
+      averageDaysOverdue: 0
+    };
+
+    let totalDaysOverdue = 0;
+
+    overdueRequests.forEach(request => {
+      // Calculate days overdue
+      const daysOverdue = Math.ceil((now - request.scheduledDate) / (1000 * 60 * 60 * 24));
+      totalDaysOverdue += daysOverdue;
+
+      // Group by type
+      overdueStats.byType[request.type] = (overdueStats.byType[request.type] || 0) + 1;
+
+      // Group by team
+      const teamName = request.team.name;
+      overdueStats.byTeam[teamName] = (overdueStats.byTeam[teamName] || 0) + 1;
+
+      // Group by status
+      overdueStats.byStatus[request.status] = (overdueStats.byStatus[request.status] || 0) + 1;
+    });
+
+    if (overdueRequests.length > 0) {
+      overdueStats.averageDaysOverdue = Math.round(totalDaysOverdue / overdueRequests.length);
+    }
+
+    // Add days overdue to each request
+    const requestsWithDaysOverdue = overdueRequests.map(request => ({
+      ...request,
+      daysOverdue: Math.ceil((now - request.scheduledDate) / (1000 * 60 * 60 * 24))
+    }));
+
+    return {
+      statistics: overdueStats,
+      requests: requestsWithDaysOverdue
+    };
+  }
 }
 
 module.exports = RequestService;

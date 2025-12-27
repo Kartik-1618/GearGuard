@@ -45,4 +45,37 @@ router.get(
   DashboardController.getMaintenanceStatistics
 );
 
+/**
+ * @route   GET /api/dashboard/reports/teams
+ * @desc    Get reports for requests grouped by team
+ * @access  Admin, Manager
+ */
+router.get(
+  '/reports/teams',
+  requireRoles('ADMIN', 'MANAGER'),
+  DashboardController.getRequestsByTeamReport
+);
+
+/**
+ * @route   GET /api/dashboard/reports/equipment
+ * @desc    Get reports for requests grouped by equipment
+ * @access  Admin, Manager
+ */
+router.get(
+  '/reports/equipment',
+  requireRoles('ADMIN', 'MANAGER'),
+  DashboardController.getRequestsByEquipmentReport
+);
+
+/**
+ * @route   GET /api/dashboard/reports/overdue
+ * @desc    Get overdue requests report
+ * @access  Admin, Manager, Technician (filtered by role)
+ */
+router.get(
+  '/reports/overdue',
+  requireAuthenticated(),
+  DashboardController.getOverdueRequestsReport
+);
+
 module.exports = router;
