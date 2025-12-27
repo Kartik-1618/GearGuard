@@ -1,0 +1,24 @@
+Auth
+ ├── Login
+ └── Register
+
+Dashboard
+
+Equipment
+ ├── Equipment List
+ ├── Equipment Detail
+ └── Add/Edit Equipment
+
+Maintenance
+ ├── Kanban Board
+ ├── Create Request
+ ├── Request Detail
+ └── Calendar View
+
+Teams
+ ├── Team List
+ └── Team Detail
+
+Reports (Optional)
+
+Settings / Profile

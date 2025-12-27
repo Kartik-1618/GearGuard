@@ -1,0 +1,124 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum Role {
+  ADMIN
+  MANAGER
+  TECHNICIAN
+}
+
+enum MaintenanceType {
+  CORRECTIVE
+  PREVENTIVE
+}
+
+enum MaintenanceStatus {
+  NEW
+  IN_PROGRESS
+  REPAIRED
+  SCRAP
+}
+
+// Models
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  role      Role
+  teamId    Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  team              Team?               @relation(fields: [teamId], references: [id])
+  createdRequests   MaintenanceRequest[] @relation("RequestCreator")
+  assignedRequests  MaintenanceRequest[] @relation("RequestAssignee")
+  logEntries        RequestLog[]
+  
+  @@map("users")
+}
+
+model Team {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  users               User[]
+  equipment           Equipment[]
+  maintenanceRequests MaintenanceRequest[]
+  
+  @@map("teams")
+}
+
+model Equipment {
+  id           Int       @id @default(autoincrement())
+  name         String
+  serialNumber String    @unique
+  department   String
+  location     String
+  purchaseDate DateTime
+  warrantyEnd  DateTime?
+  teamId       Int
+  isScrapped   Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  
+  // Relations
+  team                Team                 @relation(fields: [teamId], references: [id])
+  maintenanceRequests MaintenanceRequest[]
+  
+  @@map("equipment")
+}
+
+model MaintenanceRequest {
+  id            Int                    @id @default(autoincrement())
+  subject       String
+  description   String
+  type          MaintenanceType
+  status        MaintenanceStatus      @default(NEW)
+  equipmentId   Int
+  teamId        Int
+  assignedTo    Int?
+  scheduledDate DateTime?
+  durationHours Float?
+  createdBy     Int
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  
+  // Relations
+  equipment Equipment @relation(fields: [equipmentId], references: [id])
+  team      Team      @relation(fields: [teamId], references: [id])
+  assignee  User?     @relation("RequestAssignee", fields: [assignedTo], references: [id])
+  creator   User      @relation("RequestCreator", fields: [createdBy], references: [id])
+  logs      RequestLog[]
+  
+  @@map("maintenance_requests")
+}
+
+model RequestLog {
+  id        Int      @id @default(autoincrement())
+  requestId Int
+  oldStatus MaintenanceStatus?
+  newStatus MaintenanceStatus
+  changedBy Int
+  changedAt DateTime @default(now())
+  
+  // Relations
+  request MaintenanceRequest @relation(fields: [requestId], references: [id])
+  user    User               @relation(fields: [changedBy], references: [id])
+  
+  @@map("request_logs")
+}
